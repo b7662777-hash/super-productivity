@@ -3,14 +3,16 @@ import { getDiffInDays } from '../../../util/get-diff-in-days';
 import { getDiffInMonth } from '../../../util/get-diff-in-month';
 import { getDiffInYears } from '../../../util/get-diff-in-years';
 import { getDiffInWeeks } from '../../../util/get-diff-in-weeks';
-import { dateStrToUtcDate } from '../../../util/date-str-to-utc-date';
-import { getEffectiveLastTaskCreationDay } from './get-effective-last-task-creation-day.util';
-import { getEffectiveRepeatStartDate } from './get-effective-repeat-start-date.util';
+import {
+  getMonthlyAnchoredDate,
+  getTaskRepeatDateContext,
+  getYearlyAnchoredDate,
+  setYearlyDate,
+} from './get-recurrence-date-primitives.util';
 import {
   findMonthlyNthWeekdayOccurrence,
   hasNthWeekdayAnchor,
 } from './get-nth-weekday-of-month.util';
-import { Log } from '../../../core/log';
 
 export const getNextRepeatOccurrence = (
   taskRepeatCfg: TaskRepeatCfg,
@@ -23,26 +25,14 @@ export const getNextRepeatOccurrence = (
   // scheduled-list and heatmap.
   { inclusive = false }: { inclusive?: boolean } = {},
 ): Date | null => {
-  if (!Number.isInteger(taskRepeatCfg.repeatEvery) || taskRepeatCfg.repeatEvery < 1) {
-    Log.warn(
-      `Invalid repeatEvery value "${taskRepeatCfg.repeatEvery}" for TaskRepeatCfg "${taskRepeatCfg.id}"`,
-    );
+  const context = getTaskRepeatDateContext(taskRepeatCfg, fromDate);
+  if (!context) {
     return null;
   }
 
-  const checkDate = new Date(fromDate);
-  // Get the effective last task creation day with fallback logic
-  const startDateStr = getEffectiveRepeatStartDate(taskRepeatCfg);
-  const startDateDate = dateStrToUtcDate(startDateStr);
-
-  // Get the effective last task creation day with fallback logic
-  const lastTaskCreationDateStr =
-    getEffectiveLastTaskCreationDay(taskRepeatCfg) || '1970-01-01';
-  const lastTaskCreation = dateStrToUtcDate(lastTaskCreationDateStr);
-  // Use noon (12:00) to avoid DST issues - noon is never affected by DST transitions
-  checkDate.setHours(12, 0, 0, 0);
-  lastTaskCreation.setHours(12, 0, 0, 0);
-  startDateDate.setHours(12, 0, 0, 0);
+  const { startDateDate } = context;
+  const checkDate = context.checkDate;
+  const lastTaskCreation = context.lastTaskCreation;
 
   // In inclusive mode, never resolve to an occurrence before `fromDate` itself.
   // DAILY/WEEKLY only scan forward from `fromDate`, but the day-of-month
@@ -122,22 +112,9 @@ export const getNextRepeatOccurrence = (
         });
       }
 
-      // `monthlyLastDay` anchors to month-end: day 31 makes setDateSafely's
-      // Math.min(31, lastDayOfMonth) clamp to the true last day every month.
       const dayOfMonthRepeat = taskRepeatCfg.monthlyLastDay
         ? 31
         : startDateDate.getDate();
-
-      // Handle month-end dates properly
-      const setDateSafely = (date: Date, day: number): void => {
-        date.setDate(1); // First set to 1st to avoid overflow
-        const lastDayOfMonth = new Date(
-          date.getFullYear(),
-          date.getMonth() + 1,
-          0,
-        ).getDate();
-        date.setDate(Math.min(day, lastDayOfMonth));
-      };
 
       // Move to the next possible month occurrence
       checkDate.setDate(1);
@@ -147,7 +124,9 @@ export const getNextRepeatOccurrence = (
       ) {
         checkDate.setMonth(checkDate.getMonth() + 1);
       }
-      setDateSafely(checkDate, dayOfMonthRepeat);
+      checkDate.setTime(
+        getMonthlyAnchoredDate(checkDate, dayOfMonthRepeat).getTime(),
+      );
 
       for (let i = 0; i < maxMonthsToCheck; i++) {
         const diffInMonth = getDiffInMonth(startDateDate, checkDate);
@@ -160,7 +139,9 @@ export const getNextRepeatOccurrence = (
           return checkDate;
         }
         checkDate.setMonth(checkDate.getMonth() + 1);
-        setDateSafely(checkDate, dayOfMonthRepeat);
+        checkDate.setTime(
+          getMonthlyAnchoredDate(checkDate, dayOfMonthRepeat).getTime(),
+        );
       }
       return null;
     }
@@ -170,31 +151,18 @@ export const getNextRepeatOccurrence = (
       const dayOfMonthRepeat = startDateDate.getDate();
       const monthOfMonthRepeat = startDateDate.getMonth();
 
-      // Handle Feb 29 for non-leap years
-      const setYearlyDate = (date: Date): void => {
-        date.setDate(1);
-        date.setMonth(monthOfMonthRepeat);
-        if (monthOfMonthRepeat === 1 && dayOfMonthRepeat === 29) {
-          // February 29 - check if leap year
-          const isLeapYear = (year: number): boolean => {
-            return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-          };
-          if (!isLeapYear(date.getFullYear())) {
-            date.setDate(28); // Set to Feb 28 for non-leap years
-          } else {
-            date.setDate(29);
-          }
-        } else {
-          date.setDate(dayOfMonthRepeat);
-        }
-      };
-
-      setYearlyDate(checkDate);
+      checkDate.setTime(
+        getYearlyAnchoredDate(
+          checkDate,
+          monthOfMonthRepeat,
+          dayOfMonthRepeat,
+        ).getTime(),
+      );
 
       // If we've already passed this year's occurrence, move to next year
       if (checkDate <= lastTaskCreation) {
         checkDate.setFullYear(checkDate.getFullYear() + 1);
-        setYearlyDate(checkDate);
+        setYearlyDate(checkDate, monthOfMonthRepeat, dayOfMonthRepeat);
       }
 
       for (let i = 0; i < maxYearsToCheck; i++) {
@@ -208,7 +176,7 @@ export const getNextRepeatOccurrence = (
           return checkDate;
         }
         checkDate.setFullYear(checkDate.getFullYear() + 1);
-        setYearlyDate(checkDate);
+        setYearlyDate(checkDate, monthOfMonthRepeat, dayOfMonthRepeat);
       }
       return null;
     }
